@@ -4,6 +4,8 @@
 #include <fstream>
 #include <vector>
 #include <cassert>
+#include <iomanip>
+#include <numeric>
 
 int timestamp_intializer = 0;
 
@@ -55,6 +57,7 @@ struct Transaction
     int timestamp_;
     schedule_t queue_;
     std::vector<Lock> waiting_;
+    bool wait_ = false;
 };
 
 struct Lock
@@ -64,17 +67,26 @@ struct Lock
         return a.transaction_ == b.transaction_ && a.obj_ == b.obj_;
     }
 
+    Lock(const std::string& transaction, const std::string& object)
+    {
+        transaction_ = transaction;
+        obj_ = object;
+    }
+
     std::string transaction_;
     std::string obj_;
 };
 
 schedule_t WaitDieScheduler(const schedule_t& toschedule);
-bool TransactionInPool(const std::vector<Transaction>& pool, const std::vector<Transaction>& waitpool, const Action& action);
+bool TransactionInPool(const std::vector<Transaction>& pool, const Action& action);
 void SyncLocks(std::vector<Transaction>& waitpool, std::vector<Lock> locks);
 bool TransactionsInQueues(const std::vector<Transaction>& pool);
 bool LockExists(const std::string& obj, const std::vector<Lock>& locks);
 bool TransactionOwnsLock(const std::string& transaction, const std::string& obj, const std::vector<Lock>& locks);
-Transaction GetLockOwner(std::vector<Transaction> transactions, const std::string& obj, const std::vector<Lock>& locks);
+Transaction GetLockOwner(const std::vector<Transaction>& transactions, const std::string& obj, const std::vector<Lock>& locks);
+int ProcessAction(const schedule_t& toschedule, schedule_t& schedule, std::vector<Lock>& locks, bool& aflag, std::vector<Transaction>& pool, Transaction& current, int actioni);
+
+void Print(std::vector<Lock>& locks, std::vector<Transaction>& pool);
 
 int main()
 {
@@ -103,10 +115,10 @@ int main()
 
     auto schedule = WaitDieScheduler(test_three);
 
-    for (auto i : schedule)
+    /*for (auto i : schedule)
     {
         std::cout << i << std::endl;
-    }
+    }*/
 
     return 0;
 }
@@ -115,9 +127,6 @@ schedule_t WaitDieScheduler(const schedule_t& toschedule)
 {
     // Transactions actively happening
     std::vector<Transaction> pool;
-
-    // Transactions waiting to happen
-    std::vector<Transaction> waitpool;
 
     // All locks currently held
     std::vector<Lock> locks;
@@ -133,129 +142,19 @@ schedule_t WaitDieScheduler(const schedule_t& toschedule)
     {
         // Sort the active transactions in the pool by name
         std::sort(pool.begin(), pool.end(), [](const Transaction& lhs, const Transaction& rhs) {
-            return lhs.name_ > rhs.name_;
+            return lhs.name_ < rhs.name_;
             });
 
-        // storage for transactions we'll remove if theyre told to wait
-        std::vector<Transaction> remove_from_pool;
         for (auto& t : pool)
         {
-            bool action_done = false;
+            bool action_done = false; // flag that will check if an operation was 'completed'
             if (t.queue_.size() > 0)
             {
-                // If there are items in queue, grab the first one
-                auto action = t.queue_.at(0);
-
-                if (action.GetType() == "WRITE")
-                {
-                    if (LockExists(action.GetObject(), locks))
-                    {
-                        if (TransactionOwnsLock(action.GetTransaction(), action.GetObject(), locks))
-                        {
-                            schedule.push_back(action);
-                            action_done = true;
-                        }
-                        else
-                        {
-                            std::vector<Transaction> pooltosearch;
-                            for (auto i : pool)
-                            {
-                                pooltosearch.push_back(i);
-                            }
-
-                            for (auto i : waitpool)
-                            {
-                                pooltosearch.push_back(i);
-                            }
-
-                            // this transaction needs to either wait or die
-                            auto owner = GetLockOwner(pooltosearch, action.GetObject(), locks);
-
-                            if (t.timestamp_ < owner.timestamp_)
-                            {
-                                schedule.push_back(Action(action.GetObject(), action.GetTransaction(), "WAIT"));
-                                
-                                Lock l;
-                                l.obj_ = action.GetObject();
-                                l.transaction_ = owner.name_;
-
-                                // This transaction is now waiting on lock l
-                                t.waiting_.push_back(l);
-
-                                // Move to wait pool
-                                remove_from_pool.push_back(t);
-                                waitpool.push_back(t);
-                            }
-                            else
-                            {
-                                schedule.push_back(Action(action.GetObject(), action.GetTransaction(), "ROLLBACK"));
-
-                                t.queue_.clear();
-                                t.waiting_.clear();
-
-                                for (int i = 0; i < actioni; i++)
-                                {
-                                    if (toschedule[i].GetTransaction() == t.name_)
-                                    {
-                                        t.queue_.push_back(toschedule[i]);
-                                    }
-                                }
-
-                                std::vector<Lock> toremove;
-                                for (auto i : locks)
-                                {
-                                    if (i.transaction_ == t.name_)
-                                    {
-                                        toremove.push_back(i);
-                                        schedule.push_back(Action(i.obj_, i.transaction_, "UNLOCK"));
-                                    }
-                                }
-
-                                for (auto i : toremove)
-                                {
-                                    locks.erase(std::remove(locks.begin(), locks.end(), i), locks.end());
-                                }
-                            }
-                                
-                            action_done = false;
-                        }
-                    }
-                    else
-                    {
-                        schedule.push_back(Action(action.GetObject(), action.GetTransaction(), "LOCK"));
-                        schedule.push_back(action);
-
-                        Lock k;
-                        k.obj_ = action.GetObject();
-                        k.transaction_ = action.GetTransaction();
-                        locks.push_back(k);
-
-                        action_done = true;
-                    }
-                }
-                else if (action.GetType() == "COMMIT")
-                {
-                    schedule.push_back(action);
-
-                    std::vector<Lock> toremove;
-                    for (auto i : locks)
-                    {
-                        if (i.transaction_ == action.GetTransaction())
-                        {
-                            toremove.push_back(i);
-                            schedule.push_back(Action(i.obj_, i.transaction_, "UNLOCK"));
-                        }
-                    }
-
-                    for (auto i : toremove)
-                    {
-                        locks.erase(std::remove(locks.begin(), locks.end(), i), locks.end());
-                    }
-
-                    action_done = true;
-                }
+                std::cout << std::setfill('-') << std::setw(20) << "\n" << std::endl;
+                ProcessAction(toschedule, schedule, locks, action_done, pool, t, actioni);
+                Print(locks, pool);
             }
-
+            
             if (action_done)
             {
                 // if action was completed, remove it from queue
@@ -264,36 +163,23 @@ schedule_t WaitDieScheduler(const schedule_t& toschedule)
             }
 
             // Make sure transactions in waitpool are not waiting on locks that have been released
-            SyncLocks(waitpool, locks);
+            SyncLocks(pool, locks);
 
             // Return transactions to pool if they are not waiting any longer
-            std::vector<Transaction> waitpoolremove;
-            for (auto i : waitpool)
+            for (auto& i : pool)
             {
-                if (i.waiting_.size() == 0)
+                if (i.waiting_.size() == 0 && i.wait_)
                 {
-                    pool.push_back(i);
-                    waitpoolremove.push_back(i);
+                    i.wait_ = false;
                 }
             }
-
-            // remove restarted transaction from waitpool 
-            for (auto transaction : waitpoolremove)
-            {
-                waitpool.erase(std::remove(waitpool.begin(), waitpool.end(), transaction), waitpool.end());
-            }
-        }
-
-        for (auto i : remove_from_pool)
-        {
-            pool.erase(std::remove(pool.begin(), pool.end(), i), pool.end());
         }
 
         if (actioni < toschedule.size())
         {
             // next transaction to be added
             auto ttoadd = toschedule[actioni];
-            if (!TransactionInPool(pool, waitpool, ttoadd))
+            if (!TransactionInPool(pool, ttoadd))
             {
                 Transaction t(ttoadd.GetTransaction());
                 t.queue_.push_back(ttoadd);
@@ -302,15 +188,6 @@ schedule_t WaitDieScheduler(const schedule_t& toschedule)
             else
             {
                 for (auto& transaction : pool)
-                {
-                    if (transaction.name_ == ttoadd.GetTransaction())
-                    {
-                        transaction.queue_.push_back(ttoadd);
-                        break;
-                    }
-                }
-
-                for (auto& transaction : waitpool)
                 {
                     if (transaction.name_ == ttoadd.GetTransaction())
                     {
@@ -332,17 +209,9 @@ schedule_t WaitDieScheduler(const schedule_t& toschedule)
     return schedule;
 }
 
-bool TransactionInPool(const std::vector<Transaction>& pool, const std::vector<Transaction>& waitpool, const Action& action)
+bool TransactionInPool(const std::vector<Transaction>& pool, const Action& action)
 {
     for (const auto& i : pool)
-    {
-        if (i.name_ == action.GetTransaction())
-        {
-            return true;
-        }
-    }
-
-    for (const auto& i : waitpool)
     {
         if (i.name_ == action.GetTransaction())
         {
@@ -353,21 +222,25 @@ bool TransactionInPool(const std::vector<Transaction>& pool, const std::vector<T
     return false;
 }
 
-void SyncLocks(std::vector<Transaction>& waitpool, std::vector<Lock> locks)
-{
-    for (auto& tran : waitpool)
-    {
-        std::vector<Lock> newlocks;
-        for (auto& lock : tran.waiting_)
+void SyncLocks(std::vector<Transaction>& pool, std::vector<Lock> locks)
+{   
+    for (auto& tran : pool)
+    {     
+        if (tran.wait_)
         {
-            auto pos = std::find(locks.begin(), locks.end(), lock);
-            if (pos != locks.end())
+            // remove all locks from this transactions waiting list if the lock is no
+            //      longer active
+            std::vector<Lock> newlocks;
+            for (const auto& lock : tran.waiting_)
             {
-                newlocks.push_back(lock);
+                auto pos = std::find(locks.begin(), locks.end(), lock);
+                if (pos != locks.end())
+                {
+                    newlocks.push_back(lock);
+                }
             }
+            tran.waiting_ = newlocks;
         }
-
-        tran.waiting_ = newlocks;
     }
 }
 
@@ -375,7 +248,7 @@ bool TransactionsInQueues(const std::vector<Transaction>& pool)
 {
     bool ret = false;
 
-    for (auto i : pool)
+    for (const auto& i : pool)
     {
         if (i.queue_.size() > 0)
         {
@@ -391,7 +264,7 @@ bool LockExists(const std::string& obj, const std::vector<Lock>& locks)
 {
     bool found = false;
 
-    for (auto i : locks)
+    for (const auto & i : locks)
     {
         if (i.obj_ == obj)
         {
@@ -406,7 +279,7 @@ bool LockExists(const std::string& obj, const std::vector<Lock>& locks)
 bool TransactionOwnsLock(const std::string& transaction, const std::string& obj, const std::vector<Lock>& locks)
 {
     bool found = false;
-    for (auto i : locks)
+    for (const auto& i : locks)
     {
         if (i.obj_ == obj && i.transaction_ == transaction)
         {
@@ -418,24 +291,149 @@ bool TransactionOwnsLock(const std::string& transaction, const std::string& obj,
     return found;
 }
 
-Transaction GetLockOwner(std::vector<Transaction> transactions, const std::string& obj, const std::vector<Lock>& locks)
+Transaction GetLockOwner(const std::vector<Transaction>& transactions, const std::string& obj, const std::vector<Lock>& locks)
 {
     std::string owner;
+    // Find the owner of the lock this object is in
+    auto f = std::find_if(locks.begin(), locks.end(), [obj](const Lock& l) {
+        return l.obj_ == obj; });
+
+    owner = f->transaction_;
+
+    // Find the transaction that owned the lock
+    auto found = std::find_if(transactions.begin(), transactions.end(), [owner](const Transaction& t) {
+        return t.name_ == owner; });
+    
+    return *found;
+}
+
+int ProcessAction(const schedule_t& toschedule, schedule_t& schedule, std::vector<Lock>& locks, bool& aflag, std::vector<Transaction>& pool, Transaction& current, int actioni)
+{
+    // If there are items in queue, grab the first one
+    if (!current.wait_)
+    {
+        auto action = current.queue_.at(0);
+
+        if (action.GetType() == "WRITE")
+        {
+            if (LockExists(action.GetObject(), locks))
+            {
+                if (TransactionOwnsLock(action.GetTransaction(), action.GetObject(), locks))
+                {
+                    schedule.push_back(action);
+                    aflag = true;
+                }
+                else
+                {
+                    // this transaction needs to either wait or die
+                    auto owner = GetLockOwner(pool, action.GetObject(), locks);
+
+                    if (current.timestamp_ < owner.timestamp_)
+                    {
+                        schedule.push_back(Action(action.GetObject(), action.GetTransaction(), "WAIT"));
+
+                        Lock l(owner.name_, action.GetObject());
+
+                        // This transaction is now waiting on lock l
+                        current.waiting_.push_back(l);
+
+                        current.wait_ = true;
+                    }
+                    else
+                    {
+                        schedule.push_back(Action(action.GetObject(), action.GetTransaction(), "ROLLBACK"));
+
+                        current.queue_.clear();
+                        current.waiting_.clear();
+
+                        for (int i = 0; i < actioni; i++)
+                        {
+                            if (toschedule[i].GetTransaction() == current.name_)
+                            {
+                                current.queue_.push_back(toschedule[i]);
+                            }
+                        }
+
+                        std::vector<Lock> toremove;
+                        for (auto i : locks)
+                        {
+                            if (i.transaction_ == current.name_)
+                            {
+                                std::cout << "LOCK RELEASED BY: " << current.name_ << "; ";
+                                std::cout << i.obj_ << " ";
+                                toremove.push_back(i);
+                                schedule.push_back(Action(i.obj_, i.transaction_, "UNLOCK"));
+                            }
+                        }
+
+                        std::cout << std::endl;
+
+                        for (auto& i : toremove)
+                        {
+                            locks.erase(std::remove(locks.begin(), locks.end(), i), locks.end());
+                        }
+                    }
+
+                    aflag = false;
+                }
+            }
+            else
+            {
+                schedule.push_back(Action(action.GetObject(), action.GetTransaction(), "LOCK"));
+                schedule.push_back(action);
+
+                Lock k(action.GetTransaction(), action.GetObject());
+                locks.push_back(k);
+
+                aflag = true;
+            }
+        }
+        else if (action.GetType() == "COMMIT")
+        {
+            schedule.push_back(action);
+
+            std::vector<Lock> toremove;
+            for (auto i : locks)
+            {
+                if (i.transaction_ == action.GetTransaction())
+                {
+                    toremove.push_back(i);
+                    schedule.push_back(Action(i.obj_, i.transaction_, "UNLOCK"));
+                }
+            }
+
+            for (auto i : toremove)
+            {
+                locks.erase(std::remove(locks.begin(), locks.end(), i), locks.end());
+            }
+
+            aflag = true;
+        }
+    }
+
+    return 0;
+}
+
+void Print(std::vector<Lock>& locks, std::vector<Transaction>& pool)
+{
     for (auto i : locks)
     {
-        if (obj == i.obj_)
+        std::cout << "Lock: " << i.obj_ << "; Owned by: " << i.transaction_ << "; Being waited on by: ";
+        for (auto j : pool)
         {
-            owner = i.transaction_;
+            for (auto k : j.waiting_)
+            {
+                if (k.obj_ == i.obj_)
+                {
+                    std::cout << j.name_ << " ";
+                }
+            }
         }
+
+        std::cout << "\n\n";
     }
 
-    for (auto& i : transactions)
-    {
-        if (i.name_ == owner)
-        {
-            return i;
-        }
-    }
+    std::cout << std::setfill('-') << std::setw(20) << "";
 
-    return Transaction("ERROR IN GETLOCKOWNER");
+    std::cout << "\n\n\n" << std::endl;
 }
